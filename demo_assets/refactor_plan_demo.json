@@ -1,0 +1,19 @@
+{
+  "common_file": "src/common_math.c",
+  "common_code": "double normalize_to_percent(double value, double min, double max) {\n    double denominator = max - min;\n    if (denominator <= 0.0) {\n        return 0.0;\n    }\n\n    double normalized = (value - min) / denominator;\n    if (normalized < 0.0) {\n        normalized = 0.0;\n    }\n    if (normalized > 1.0) {\n        normalized = 1.0;\n    }\n\n    double scaled = normalized * 100.0;\n    if (scaled < 0.0) {\n        scaled = 0.0;\n    }\n    if (scaled > 100.0) {\n        scaled = 100.0;\n    }\n    return scaled;\n}\n",
+  "replacements": [
+    {
+      "file": "src/metrics_a.c",
+      "start_line": 1,
+      "end_line": 47,
+      "replacement": "double normalize_to_percent(double value, double min, double max);\n\ndouble normalize_score(double value, double min, double max) {\n    return normalize_to_percent(value, min, max);\n}\n\ndouble clamp_score(double value, double min, double max) {\n    return normalize_to_percent(value, min, max);\n}\n"
+    },
+    {
+      "file": "src/metrics_b.c",
+      "start_line": 1,
+      "end_line": 47,
+      "replacement": "double normalize_to_percent(double value, double min, double max);\n\ndouble normalize_value(double input, double low, double high) {\n    return normalize_to_percent(input, low, high);\n}\n\ndouble clamp_value(double input, double low, double high) {\n    return normalize_to_percent(input, low, high);\n}\n"
+    }
+  ],
+  "notes": "Demo offline refactor plan"
+}

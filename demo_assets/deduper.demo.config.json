@@ -1,0 +1,41 @@
+{
+  "workspace": "demo_c",
+  "build": {
+    "before_apply": {
+      "command": [
+        "C:/Program Files/LLVM/bin/clang.exe",
+        "src/*.c",
+        "-o",
+        "demo_c_app.exe"
+      ],
+      "cwd": "."
+    },
+    "after_apply": {
+      "command": [
+        "C:/Program Files/LLVM/bin/clang.exe",
+        "src/*.c",
+        "-o",
+        "demo_c_app.exe"
+      ],
+      "cwd": "."
+    }
+  },
+  "model": {
+    "routes": [
+      {
+        "provider": "vllm",
+        "model": "Qwen/Qwen3-Coder-32B-Instruct",
+        "base_url": "http://127.0.0.1:8000",
+        "api_key": "EMPTY"
+      },
+      {
+        "provider": "ollama",
+        "model": "qwen3-coder:480b-cloud",
+        "base_url": "http://localhost:11434",
+        "api_key": null
+      }
+    ],
+    "temperature": 0.1,
+    "max_tokens": 4096
+  }
+}

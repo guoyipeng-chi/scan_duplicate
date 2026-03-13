@@ -1,0 +1,38 @@
+{
+  "workspace": ".",
+  "build": {
+    "before_apply": {
+      "command": ["clang", "src/*.c", "-o", "app"],
+      "cwd": "."
+    },
+    "after_apply": {
+      "command": ["clang", "src/*.c", "-o", "app"],
+      "cwd": "."
+    }
+  },
+  "model": {
+    "routes": [
+      {
+        "provider": "agent",
+        "model": "claude-3-5-sonnet-20241022",
+        "base_url": null,
+        "api_key": null,
+        "agent_name": "Senior Refactor Agent"
+      },
+      {
+        "provider": "vllm",
+        "model": "Qwen/Qwen3-Coder-32B-Instruct",
+        "base_url": "http://127.0.0.1:8000",
+        "api_key": "EMPTY"
+      },
+      {
+        "provider": "ollama",
+        "model": "qwen3-coder:480b-cloud",
+        "base_url": "http://localhost:11434",
+        "api_key": null
+      }
+    ],
+    "temperature": 0.1,
+    "max_tokens": 4096
+  }
+}
