@@ -270,10 +270,55 @@ def _run_pmd_and_expect_report(command: list[str], report_file: Path) -> None:
     if result.returncode in {0, 1, 4} and report_file.exists():
         return
 
+    def _normalize_output(label: str, content: str | None) -> str:
+        text = (content or "").strip()
+        if not text:
+            return f"{label}: <empty>"
+        preview = text if len(text) <= 8000 else text[:8000] + "\n...[truncated]"
+        return f"{label}:\n{preview}"
+
+    report_exists = report_file.exists()
+    report_size = report_file.stat().st_size if report_exists else 0
+
+    env_checks: list[str] = []
+    try:
+        pmd_version = _run_capture([command[0], "--version"], check=False)
+        env_checks.append(f"PMD --version exit={pmd_version.returncode}")
+        env_checks.append(_normalize_output("PMD --version stdout", pmd_version.stdout))
+        env_checks.append(_normalize_output("PMD --version stderr", pmd_version.stderr))
+    except Exception as exc:
+        env_checks.append(f"PMD --version check failed: {exc}")
+
+    try:
+        java = _detect_java()
+        if java:
+            java_version = _run_capture([str(java), "-version"], check=False)
+            env_checks.append(f"java path={java}")
+            env_checks.append(f"java -version exit={java_version.returncode}")
+            env_checks.append(_normalize_output("java -version stdout", java_version.stdout))
+            env_checks.append(_normalize_output("java -version stderr", java_version.stderr))
+        else:
+            env_checks.append("java path=<not found>")
+    except Exception as exc:
+        env_checks.append(f"java check failed: {exc}")
+
+    hint = ""
+    if result.returncode == 5:
+        hint = (
+            "\n提示: PMD 退出码 5 常见于运行时异常（参数组合、语言设置、Java/PMD 兼容性或扫描目录权限问题）。"
+            "请重点检查 --language、repo 路径可读性，以及 PMD/Java 版本输出。"
+        )
+
     raise RuntimeError(
         f"PMD 执行失败，退出码={result.returncode}\n"
-        f"stdout:\n{result.stdout}\n"
-        f"stderr:\n{result.stderr}"
+        f"command: {' '.join(command)}\n"
+        f"cwd: {Path.cwd()}\n"
+        f"report_file: {report_file}\n"
+        f"report_exists: {report_exists}, report_size={report_size}\n"
+        f"{_normalize_output('stdout', result.stdout)}\n"
+        f"{_normalize_output('stderr', result.stderr)}\n"
+        f"runtime_checks:\n" + "\n".join(env_checks)
+        + hint
     )
 
 

@@ -4,7 +4,7 @@
 1. 用 PMD CPD 扫描 C/C++ 仓库重复代码（Windows/Linux）。
 2. 解析 XML 报告并列出重复组。
 3. 用户选择重复组（命令行交互或参数）。
-4. 调用 vLLM（Qwen3-Coder）或 Ollama 生成重构计划。
+4. 调用 Claude Agent（Python SDK）、vLLM 或 Ollama 生成重构计划。
 5. 应用提取公共代码修改，并可演示生成 commit。
 
 ## 1. 安装
@@ -16,6 +16,50 @@ pip install -r requirements.txt
 ## 2. 配置模型
 
 复制 `deduper.config.example.json` 为 `deduper.config.json` 并修改。
+
+### 路由与优先级（当前实现）
+
+- 支持 provider：`agent`（Claude SDK）、`vllm`、`ollama`
+- 运行时尝试顺序固定为：`agent -> vllm -> ollama`
+- 即使你在 `routes` 里写了不同顺序，也会按上面的优先级执行
+
+### Claude Agent 示例（推荐）
+
+```json
+{
+  "workspace": ".",
+  "model": {
+    "routes": [
+      {
+        "provider": "agent",
+        "model": "claude-3-5-sonnet-20241022",
+        "base_url": null,
+        "api_key": null,
+        "agent_name": "Senior Refactor Agent"
+      },
+      {
+        "provider": "vllm",
+        "model": "Qwen/Qwen3-Coder-32B-Instruct",
+        "base_url": "http://127.0.0.1:8000",
+        "api_key": "EMPTY"
+      },
+      {
+        "provider": "ollama",
+        "model": "qwen3-coder:480b-cloud",
+        "base_url": "http://localhost:11434",
+        "api_key": null
+      }
+    ],
+    "temperature": 0.1,
+    "max_tokens": 4096
+  }
+}
+```
+
+说明：
+- `agent` 走 Anthropic Python SDK（`anthropic`）
+- `api_key` 可为空；为空时会使用 SDK 的默认认证链路
+- 如果你生产机已配置好 Claude 凭据，工具侧通常不需要额外配置
 
 ### Ollama 示例
 
@@ -32,7 +76,7 @@ pip install -r requirements.txt
       },
       {
         "provider": "ollama",
-        "model": "qwen3-coder:latest",
+        "model": "qwen3-coder:480b-cloud",
         "base_url": "http://localhost:11434",
         "api_key": null
       }
@@ -43,7 +87,7 @@ pip install -r requirements.txt
 }
 ```
 
-说明：`routes` 按顺序尝试，默认可配置为 `vLLM -> Ollama`，当 vLLM 不可达或模型不存在时自动回退到 Ollama。
+说明：`routes` 用于配置候选路由；实际执行时会按 `agent -> vllm -> ollama` 尝试并自动回退。
 
 ### vLLM 示例
 
@@ -113,7 +157,10 @@ python main.py workflow --repo <repo_path> --mode scan-only
 
 在交互表格中，可直接输入重复组 ID（例如 `1` 或 `1,3`）进入大模型重构流程，不再必须输入 `s 1,3`。
 `workflow --mode scan-only` 和 `list --preview` 下也支持这一点；只要提供可用配置文件，就能从预览页直接进入重构。
-如果扫描目标是仓库内置的 `demo_c`，且未提供 `--config`、也不存在 `deduper.config.json`，工具会自动回退到 `demo_assets/deduper.demo.config.json`。
+如果未提供 `--config`，工具会按如下顺序找配置：
+1) `deduper.config.json`
+2) `demo_assets/deduper.demo.config.json`
+3) `deduper.config.example.json`
 
 从扫描直接进入完整流程：
 
@@ -213,15 +260,17 @@ python scripts/run_demo.py --mode llm
 - 建议先不加 `--apply` 做 dry-run，再正式落盘。
 - 工具会检查写入路径是否越界，避免改写工作区外文件。
 
-## 8. 用户操作流程指导（vLLM 优先，回退 Ollama）
+## 8. 用户操作流程指导（Claude 优先，自动回退）
 
 1) 准备模型服务
+- Claude Agent：确保环境可用 Anthropic SDK 认证（可选显式配置 `api_key`）
 - 可选：启动 vLLM OpenAI 兼容服务（默认示例地址 `http://127.0.0.1:8000`）
 - 启动 Ollama 服务，并确保有可用模型（例如 `qwen3-coder:480b-cloud`）
 
 2) 配置路由优先级
-- 在配置文件中设置 `model.routes`，顺序为：`vllm` 在前、`ollama` 在后
-- 工具会依次尝试，vLLM 不可用或模型不存在时自动回退到 Ollama
+- 在配置文件中设置 `model.routes`
+- 工具会按 `agent -> vllm -> ollama` 尝试
+- 上游不可用时会自动回退到下一个 provider
 
 3) 扫描重复代码（CPD）
 
@@ -254,4 +303,4 @@ git -C demo_c commit -m "refactor: extract duplicated normalization logic"
 python scripts/run_demo.py --mode llm
 ```
 
-运行输出中会显示路由日志：先尝试 vLLM，失败后自动回退到 Ollama。
+运行输出中会显示路由日志：先尝试 Claude Agent，失败后自动回退到 vLLM / Ollama。
