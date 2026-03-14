@@ -69,6 +69,14 @@ def _build_user_prompt(groups: list[DuplicationGroup], files_context: dict[str, 
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _build_agent_prompt_from_markdown(markdown_content: str) -> str:
+    return (
+        "你将收到一份由系统整理的 Markdown，上面是用户在 duplication.xml 中选中的重复片段信息。\n"
+        "请严格基于该 Markdown 的信息生成重构方案，并输出严格 JSON（不要 markdown 代码块）。\n\n"
+        + markdown_content
+    )
+
+
 def _strip_fences(text: str) -> str:
     trimmed = text.strip()
     if trimmed.startswith("```"):
@@ -175,8 +183,10 @@ def generate_refactor_plan(
     config: ModelConfig,
     groups: list[DuplicationGroup],
     files_context: dict[str, str],
+    agent_markdown: str | None = None,
 ) -> LLMRefactorPlan:
-    user_prompt = _build_user_prompt(groups, files_context)
+    default_user_prompt = _build_user_prompt(groups, files_context)
+    agent_user_prompt = _build_agent_prompt_from_markdown(agent_markdown) if agent_markdown else default_user_prompt
     errors: list[str] = []
     provider_priority = {"agent": 0, "vllm": 1, "ollama": 2}
     ordered_routes = sorted(config.routes, key=lambda item: provider_priority.get(item.provider, 99))
@@ -185,15 +195,15 @@ def generate_refactor_plan(
         try:
             print(f"[LLM] trying {route.provider} model={route.model} base_url={route.base_url}")
             if route.provider == "agent":
-                raw = _call_agent(route, config, user_prompt)
+                raw = _call_agent(route, config, agent_user_prompt)
             elif route.provider == "vllm":
                 if not _vllm_model_available(route):
                     raise RuntimeError(
                         f"vLLM 未找到模型 {route.model}，自动尝试下一个 provider"
                     )
-                raw = _call_vllm(route, config, user_prompt)
+                raw = _call_vllm(route, config, default_user_prompt)
             elif route.provider == "ollama":
-                raw = _call_ollama(route, config, user_prompt)
+                raw = _call_ollama(route, config, default_user_prompt)
             else:
                 raise ValueError(f"不支持的 provider: {route.provider}")
 

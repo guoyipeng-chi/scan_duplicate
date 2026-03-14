@@ -358,7 +358,6 @@ def scan(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     xml_report = out_dir / "duplication.xml"
-    md_report = out_dir / "duplication.md"
 
     print(f"Repository : {repo}")
     print(f"Output dir : {out_dir}")
@@ -383,10 +382,6 @@ def scan(
         base_args + ["--format", "xml", "--report-file", str(xml_report)],
         xml_report,
     )
-    _run_pmd_and_expect_report(
-        base_args + ["--format", "markdown", "--report-file", str(md_report)],
-        md_report,
-    )
 
     total_files = _count_c_files(repo)
     total_dup = _count_duplications(xml_report)
@@ -403,7 +398,6 @@ def scan(
                 f"Total C-family files: {total_files}",
                 f"Duplicate blocks: {total_dup}",
                 "",
-                f"Markdown report: {md_report}",
                 f"Raw XML: {xml_report}",
                 "",
             ]

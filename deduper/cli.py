@@ -41,6 +41,67 @@ def _collect_context(groups: list[DuplicationGroup], workspace: Path) -> dict[st
     return contexts
 
 
+def _render_occurrence_snippet(workspace: Path, group: DuplicationGroup, occurrence) -> tuple[str, int, int, str, int]:
+    full_path = _resolve_occurrence_path(workspace, occurrence.path)
+    rel = _to_rel_display(full_path, workspace)
+    if not full_path.exists():
+        return rel, 0, 0, "<file not found>", 0
+
+    content = full_path.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    total = len(lines)
+    start_line = max(1, occurrence.line)
+    if occurrence.end_line is not None:
+        end_line = min(total, max(start_line, occurrence.end_line))
+    else:
+        end_line = min(total, start_line + max(1, group.lines) - 1)
+
+    snippet_lines = [f"{line_no}|{lines[line_no - 1]}" for line_no in range(start_line, end_line + 1)]
+    snippet = "\n".join(snippet_lines) if snippet_lines else "<empty>"
+    return rel, start_line, end_line, snippet, total
+
+
+def _build_claude_input_markdown(groups: list[DuplicationGroup], workspace: Path) -> str:
+    sections: list[str] = []
+    sections.append("# Claude Refactor Input")
+    sections.append("")
+    sections.append("## Goal")
+    sections.append("- 消除所选重复片段，提取公共实现，尽量保持行为一致。")
+    sections.append("- 只允许修改下面列出的相关文件。")
+    sections.append("")
+    sections.append("## Output Format (STRICT JSON)")
+    sections.append("```json")
+    sections.append('{"common_file":"path","common_code":"...","replacements":[{"file":"path","start_line":1,"end_line":1,"replacement":"..."}],"notes":"..."}')
+    sections.append("```")
+    sections.append("")
+
+    for group in groups:
+        sections.append(f"## Group {group.id}")
+        sections.append(f"- lines: {group.lines}")
+        sections.append(f"- tokens: {group.tokens}")
+        sections.append(f"- occurrences: {len(group.occurrences)}")
+        sections.append("")
+        if group.code_fragment:
+            sections.append("### CPD codefragment")
+            sections.append("```c")
+            sections.append(group.code_fragment)
+            sections.append("```")
+            sections.append("")
+
+        for idx, occurrence in enumerate(group.occurrences, start=1):
+            rel, start_line, end_line, snippet, total = _render_occurrence_snippet(workspace, group, occurrence)
+            sections.append(f"### Occurrence {idx}")
+            sections.append(f"- file: {rel}")
+            sections.append(f"- selected_range: {start_line}-{end_line}")
+            sections.append(f"- file_total_lines: {total}")
+            sections.append("```c")
+            sections.append(snippet)
+            sections.append("```")
+            sections.append("")
+
+    return "\n".join(sections).strip() + "\n"
+
+
 def _parse_group_ids(raw: str) -> set[int]:
     ids: set[int] = set()
     normalized = raw.replace("，", ",")
@@ -380,7 +441,18 @@ def _run_refactor_for_selected_groups(
     if not context:
         raise ValueError("未加载到任何文件上下文，请检查 workspace 与 CPD path")
 
-    plan = generate_refactor_plan(config.model, selected_groups, context)
+    claude_markdown_file = Path(getattr(args, "out_claude_markdown", "artifacts/claude_refactor_input.md"))
+    claude_markdown_file.parent.mkdir(parents=True, exist_ok=True)
+    claude_markdown = _build_claude_input_markdown(selected_groups, config.workspace)
+    claude_markdown_file.write_text(claude_markdown, encoding="utf-8")
+    print(f"已生成 Claude 输入文件: {claude_markdown_file}")
+
+    plan = generate_refactor_plan(
+        config.model,
+        selected_groups,
+        context,
+        agent_markdown=claude_markdown,
+    )
     plan_file = Path(getattr(args, "out_plan", "artifacts/refactor_plan.json"))
     plan_file.parent.mkdir(parents=True, exist_ok=True)
     plan_file.write_text(plan_to_pretty_json(plan), encoding="utf-8")
@@ -539,7 +611,7 @@ def cmd_workflow(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="deduper",
-        description="基于 PMD CPD XML + 大模型（vLLM/Ollama）的重复代码提取工具",
+        description="基于 PMD CPD XML + 大模型（Claude/vLLM/Ollama）的重复代码提取工具",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -553,6 +625,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--out-plan",
         default="artifacts/refactor_plan.json",
         help="直接从预览进入重构时输出计划 JSON 路径",
+    )
+    p_list.add_argument(
+        "--out-claude-markdown",
+        default="artifacts/claude_refactor_input.md",
+        help="直接从预览进入重构时输出给 Claude 的输入 Markdown 路径",
     )
     p_list.add_argument("--apply", action="store_true", help="直接从预览进入重构时是否真正写入文件")
     p_list.add_argument(
@@ -582,6 +659,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--out-plan",
         default="artifacts/refactor_plan.json",
         help="输出计划 JSON 路径",
+    )
+    p_refactor.add_argument(
+        "--out-claude-markdown",
+        default="artifacts/claude_refactor_input.md",
+        help="输出给 Claude 的输入 Markdown 路径",
     )
     p_refactor.add_argument("--apply", action="store_true", help="是否真正写入文件")
     p_refactor.add_argument(
@@ -670,6 +752,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--out-plan",
         default="artifacts/refactor_plan.json",
         help="full 模式下输出计划 JSON 路径",
+    )
+    p_workflow.add_argument(
+        "--out-claude-markdown",
+        default="artifacts/claude_refactor_input.md",
+        help="full 模式下输出给 Claude 的输入 Markdown 路径",
     )
     p_workflow.add_argument("--apply", action="store_true", help="full 模式下是否真正写入")
     p_workflow.add_argument(

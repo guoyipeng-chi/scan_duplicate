@@ -60,6 +60,7 @@ pip install -r requirements.txt
 - `agent` 走 Anthropic Python SDK（`anthropic`）
 - `api_key` 可为空；为空时会使用 SDK 的默认认证链路
 - 如果你生产机已配置好 Claude 凭据，工具侧通常不需要额外配置
+- 用户选中重复组后，工具会自动生成一个仅包含所选片段信息的 Markdown（默认 `artifacts/claude_refactor_input.md`），供 Claude SDK 读取
 
 ### Ollama 示例
 
@@ -169,7 +170,7 @@ python main.py workflow --repo <repo_path> --mode full --groups 1 --config dedup
 ```
 
 说明：
-- `scan-only`：只生成 PMD XML/Markdown 报告，不调用大模型
+- `scan-only`：只生成 PMD XML 报告，不调用大模型
 - `full`：扫描完成后继续执行重复组选择、LLM 重构、建分支、编译校验与应用
 - `full` 成功后会自动再次扫描，并回到选择列表；同一次成功会话中只在第一轮拉分支，后续轮次复用当前工作分支
 
@@ -191,6 +192,9 @@ python main.py refactor --xml artifacts/.../duplication.xml --interactive
 
 进入表格后可直接输入 ID 数字开始处理，例如 `1` 或 `1,3`。
 
+在生成重构计划前，工具会先输出一个给 Claude 使用的片段 Markdown（默认路径：`artifacts/claude_refactor_input.md`）。
+可用 `--out-claude-markdown` 指定输出路径。
+
 指定组：
 
 ```bash
@@ -201,6 +205,12 @@ python main.py refactor --xml artifacts/.../duplication.xml --groups 1,3,5
 
 ```bash
 python main.py refactor --xml artifacts/.../duplication.xml --groups 1 --apply
+```
+
+自定义 Claude 输入 Markdown 输出路径：
+
+```bash
+python main.py refactor --xml artifacts/.../duplication.xml --groups 1 --out-claude-markdown artifacts/my_selected_groups.md
 ```
 
 默认行为：执行 `--apply` 前，工具会先在当前 Git 提交上创建并切换到一个新分支，再写入修改。
@@ -250,6 +260,7 @@ python scripts/run_demo.py --mode llm
 - `scan_c_duplication.py`: 跨平台 CPD 扫描器
 - `scan_c_duplication.sh`: Linux/macOS 包装脚本
 - `scan_c_duplication.ps1`: Windows PowerShell 包装脚本
+- `artifacts/claude_refactor_input.md`: 用户选中重复组后自动生成，供 Claude SDK 读取的输入文件
 - `demo_c/`: C 重复代码示例项目
 - `demo_assets/refactor_plan_demo.json`: 离线 demo 重构计划
 - `scripts/run_demo.py`: 端到端 demo 执行脚本
