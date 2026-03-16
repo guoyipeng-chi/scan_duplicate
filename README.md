@@ -157,6 +157,7 @@ python main.py workflow --repo <repo_path> --mode scan-only
 扫描完成后会进入重复组表格预览，按 `重复数 × 重复行数` 倒序，可翻页查看。
 
 在交互表格中，可直接输入重复组 ID（例如 `1` 或 `1,3`）进入大模型重构流程，不再必须输入 `s 1,3`。
+交互表格默认先显示“完全雷同（exact）”结果，输入 `f` 可在 `exact/all` 间切换，先处理简单的完全重复场景。
 `workflow --mode scan-only` 和 `list --preview` 下也支持这一点；只要提供可用配置文件，就能从预览页直接进入重构。
 如果未提供 `--config`，工具会按如下顺序找配置：
 1) `deduper.config.json`
@@ -205,6 +206,33 @@ python main.py refactor --xml artifacts/.../duplication.xml --groups 1,3,5
 
 ```bash
 python main.py refactor --xml artifacts/.../duplication.xml --groups 1 --apply
+```
+
+### 4.4 可切换模式：`replacement` / `line-ops`
+
+默认是 `replacement`（整段替换计划）。
+
+如果希望大模型只基于 PMD 行号与差异摘要输出结构化行操作 JSON，可使用 `line-ops`：
+
+```bash
+python main.py refactor --xml artifacts/.../duplication.xml --groups 1 --plan-mode line-ops
+```
+
+`line-ops` 输出 JSON 包含三类操作：
+- `cut_paste`：剪切粘贴（只含行号 + 目标行）
+- `delete`：删除行区间
+- `insert`：按行插入内容
+
+真正应用：
+
+```bash
+python main.py refactor --xml artifacts/.../duplication.xml --groups 1 --plan-mode line-ops --apply
+```
+
+或使用固定脚本应用已有 `line-ops` 计划：
+
+```bash
+python apply_line_ops_plan.py --plan artifacts/refactor_plan.json --config deduper.config.json --apply
 ```
 
 自定义 Claude 输入 Markdown 输出路径：
@@ -260,6 +288,7 @@ python scripts/run_demo.py --mode llm
 - `scan_c_duplication.py`: 跨平台 CPD 扫描器
 - `scan_c_duplication.sh`: Linux/macOS 包装脚本
 - `scan_c_duplication.ps1`: Windows PowerShell 包装脚本
+- `apply_line_ops_plan.py`: 固定执行脚本，读取 line-ops JSON 并实际修改文件
 - `artifacts/claude_refactor_input.md`: 用户选中重复组后自动生成，供 Claude SDK 读取的输入文件
 - `demo_c/`: C 重复代码示例项目
 - `demo_assets/refactor_plan_demo.json`: 离线 demo 重构计划

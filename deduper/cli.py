@@ -16,8 +16,14 @@ from .build_utils import BuildFailedError, run_build_step
 from .config import load_config
 from .cpd_parser import parse_cpd_xml
 from .git_utils import GitRepoError, create_branch_from_current, is_git_repo
-from .llm_clients import generate_refactor_plan, plan_to_pretty_json
-from .types import DuplicationGroup, LLMRefactorPlan
+from .line_ops_executor import apply_line_ops_plan
+from .llm_clients import (
+    generate_line_ops_plan,
+    generate_refactor_plan,
+    line_ops_plan_to_pretty_json,
+    plan_to_pretty_json,
+)
+from .types import DuplicationGroup, LLMLineOpsPlan, LLMRefactorPlan
 
 
 def _resolve_occurrence_path(workspace: Path, raw: Path) -> Path:
@@ -62,6 +68,47 @@ def _render_occurrence_snippet(workspace: Path, group: DuplicationGroup, occurre
     return rel, start_line, end_line, snippet, total
 
 
+def _extract_occurrence_raw_snippet(workspace: Path, group: DuplicationGroup, occurrence) -> str | None:
+    full_path = _resolve_occurrence_path(workspace, occurrence.path)
+    if not full_path.exists():
+        return None
+
+    lines = full_path.read_text(encoding="utf-8").splitlines()
+    total = len(lines)
+    start_line = max(1, occurrence.line)
+    if occurrence.end_line is not None:
+        end_line = min(total, max(start_line, occurrence.end_line))
+    else:
+        end_line = min(total, start_line + max(1, group.lines) - 1)
+    if start_line > total:
+        return ""
+    return "\n".join(lines[start_line - 1 : end_line])
+
+
+def _is_group_exact_duplicate(group: DuplicationGroup, workspace: Path) -> bool:
+    snippets: list[str] = []
+    for occurrence in group.occurrences:
+        snippet = _extract_occurrence_raw_snippet(workspace, group, occurrence)
+        if snippet is None:
+            return False
+        snippets.append(snippet.strip())
+
+    if len(snippets) <= 1:
+        return True
+    first = snippets[0]
+    return all(item == first for item in snippets[1:])
+
+
+def _filter_groups_by_mode(
+    groups: list[DuplicationGroup],
+    filter_mode: str,
+    exact_cache: dict[int, bool],
+) -> list[DuplicationGroup]:
+    if filter_mode == "exact":
+        return [item for item in groups if exact_cache.get(item.id, False)]
+    return groups
+
+
 def _render_context_window(
     workspace: Path,
     group: DuplicationGroup,
@@ -99,6 +146,31 @@ def _render_context_window(
 
 def _normalize_code_for_diff(code: str) -> list[str]:
     return [line.strip() for line in code.splitlines()]
+
+
+def _strip_line_prefix(code: str) -> str:
+    items: list[str] = []
+    for line in code.splitlines():
+        items.append(re.sub(r"^\s*\d+\|", "", line))
+    return "\n".join(items)
+
+
+def _extract_unified_diff_excerpt(canonical_code: str, occurrence_code: str, limit: int = 40) -> list[str]:
+    canonical_lines = _normalize_code_for_diff(canonical_code)
+    occurrence_lines = _normalize_code_for_diff(occurrence_code)
+    diff_lines = list(
+        difflib.unified_diff(
+            canonical_lines,
+            occurrence_lines,
+            fromfile="canonical",
+            tofile="occurrence",
+            lineterm="",
+            n=1,
+        )
+    )
+    if not diff_lines:
+        return ["<no diff>"]
+    return diff_lines[:limit]
 
 
 def _summarize_occurrence_diff(canonical_code: str, occurrence_code: str) -> list[str]:
@@ -190,6 +262,63 @@ def _build_claude_input_markdown(groups: list[DuplicationGroup], workspace: Path
             sections.append("```")
             sections.append("")
             sections.append("#### Local Context After")
+            sections.append("```c")
+            sections.append(after)
+            sections.append("```")
+            sections.append("")
+
+    return "\n".join(sections).strip() + "\n"
+
+
+def _build_line_ops_input_markdown(groups: list[DuplicationGroup], workspace: Path) -> str:
+    sections: list[str] = []
+    sections.append("# Line-Ops Refactor Input")
+    sections.append("")
+    sections.append("## Task Constraints")
+    sections.append("- 仅允许输出 line-ops JSON（cut_paste / delete / insert）。")
+    sections.append("- 仅允许修改下面列出的文件与行号区间。")
+    sections.append("- 不要输出整段替换方案。")
+    sections.append("- 重构策略：提取公共头文件，差异通过宏开放。")
+    sections.append("")
+    sections.append("## Output JSON Schema")
+    sections.append("```json")
+    sections.append('{"operations":{"cut_paste":[{"source_file":"path","start_line":1,"end_line":1,"target_file":"path","target_line":1,"position":"after"}],"delete":[{"file":"path","start_line":1,"end_line":1}],"insert":[{"file":"path","line":1,"position":"after","content":"..."}]},"notes":"..."}')
+    sections.append("```")
+    sections.append("")
+
+    for group in groups:
+        sections.append(f"## Group {group.id}")
+        sections.append(f"- pmd_lines: {group.lines}")
+        sections.append(f"- pmd_tokens: {group.tokens}")
+        sections.append(f"- occurrences: {len(group.occurrences)}")
+        involved_files = sorted({_to_rel_display(_resolve_occurrence_path(workspace, occ.path), workspace) for occ in group.occurrences})
+        sections.append(f"- editable_files: {', '.join(involved_files)}")
+        sections.append("")
+
+        if group.code_fragment:
+            sections.append("### Canonical Fragment")
+            sections.append("```c")
+            sections.append(group.code_fragment)
+            sections.append("```")
+            sections.append("")
+
+        for idx, occurrence in enumerate(group.occurrences, start=1):
+            rel, start_line, end_line, before, selected, after, total = _render_context_window(workspace, group, occurrence)
+            selected_no_prefix = _strip_line_prefix(selected)
+            diff_excerpt = _extract_unified_diff_excerpt(group.code_fragment or selected_no_prefix, selected_no_prefix)
+            sections.append(f"### Occurrence {idx}")
+            sections.append(f"- file: {rel}")
+            sections.append(f"- range: {start_line}-{end_line}")
+            sections.append(f"- file_total_lines: {total}")
+            sections.append("- diff_excerpt:")
+            sections.append("```diff")
+            sections.extend(diff_excerpt)
+            sections.append("```")
+            sections.append("- local_before:")
+            sections.append("```c")
+            sections.append(before)
+            sections.append("```")
+            sections.append("- local_after:")
             sections.append("```c")
             sections.append(after)
             sections.append("```")
@@ -308,6 +437,42 @@ def _apply_with_guards(
     except Exception as exc:
         _restore_snapshot(snapshot)
         raise RuntimeError(f"重构后编译/应用失败，已回滚文件变更: {exc}") from exc
+
+
+def _collect_line_ops_files(workspace: Path, plan: LLMLineOpsPlan) -> list[Path]:
+    files: set[Path] = set()
+    for item in plan.cut_paste:
+        files.add(_resolve_workspace_file(workspace, item.source_file))
+        files.add(_resolve_workspace_file(workspace, item.target_file))
+    for item in plan.delete:
+        files.add(_resolve_workspace_file(workspace, item.file))
+    for item in plan.insert:
+        files.add(_resolve_workspace_file(workspace, item.file))
+    return sorted(files)
+
+
+def _apply_line_ops_with_guards(
+    config,
+    plan: LLMLineOpsPlan,
+    args: argparse.Namespace,
+    branch_prefix: str,
+    create_branch: bool = True,
+) -> list[str]:
+    _run_build_guards(config, "before_apply")
+    apply_line_ops_plan(config.workspace, plan, dry_run=True)
+
+    tracked_files = _collect_line_ops_files(config.workspace, plan)
+    snapshot = _snapshot_files(tracked_files)
+    if create_branch:
+        _maybe_create_branch(config.workspace, args, prefix=branch_prefix)
+
+    try:
+        logs = apply_line_ops_plan(config.workspace, plan, dry_run=False)
+        _run_build_guards(config, "after_apply")
+        return logs
+    except Exception as exc:
+        _restore_snapshot(snapshot)
+        raise RuntimeError(f"line-ops 重构后编译/应用失败，已回滚文件变更: {exc}") from exc
 
 
 def _maybe_create_branch(workspace: Path, args: argparse.Namespace, prefix: str) -> bool:
@@ -475,23 +640,44 @@ def _choose_groups_with_paging(groups: list[DuplicationGroup], workspace: Path, 
         print("重复组为空。")
         return None
 
+    exact_cache = {item.id: _is_group_exact_duplicate(item, workspace) for item in groups}
+    filter_mode = "exact"
     page = 1
-    total_pages = max(1, (len(groups) + page_size - 1) // page_size)
     while True:
-        _print_table_page(groups, workspace, page, page_size)
-        raw = input("输入 n/p 翻页，直接输入 ID 数字（如 1 或 1,2）开始重构，输入 q 退出: ").strip()
-        if raw.lower() == "q":
+        filtered = _filter_groups_by_mode(groups, filter_mode, exact_cache)
+        if not filtered:
+            print(f"当前筛选模式 {filter_mode} 下无可选重复组。")
+            filter_mode = "all"
+            continue
+
+        total_pages = max(1, (len(filtered) + page_size - 1) // page_size)
+        page = max(1, min(page, total_pages))
+        exact_count = sum(1 for flag in exact_cache.values() if flag)
+        print(f"筛选模式: {filter_mode}（完全雷同组 {exact_count}/{len(groups)}）")
+        _print_table_page(filtered, workspace, page, page_size)
+        raw = input("输入 n/p 翻页，输入 f 切换筛选（exact/all），直接输入 ID 开始重构，输入 q 退出: ").strip()
+        lowered = raw.lower()
+        if lowered == "q":
             return None
-        if raw.lower() == "n":
+        if lowered == "f":
+            filter_mode = "all" if filter_mode == "exact" else "exact"
+            page = 1
+            continue
+        if lowered == "n":
             page = min(total_pages, page + 1)
             continue
-        if raw.lower() == "p":
+        if lowered == "p":
             page = max(1, page - 1)
             continue
         selected_ids = _parse_selection_input(raw)
         if selected_ids:
-            return selected_ids
-        if raw.lower().startswith("s"):
+            visible_ids = {item.id for item in filtered}
+            picked = {item for item in selected_ids if item in visible_ids}
+            if not picked:
+                print("当前筛选结果中不包含所选 ID，请先切换筛选或翻页查看。")
+                continue
+            return picked
+        if lowered.startswith("s"):
             print("请选择组 ID，例如: 1 或 1,3")
             continue
         print("无效输入，请重试。")
@@ -501,14 +687,29 @@ def _preview_with_paging(groups: list[DuplicationGroup], workspace: Path, page_s
     if not groups:
         print("重复组为空。")
         return None
+    exact_cache = {item.id: _is_group_exact_duplicate(item, workspace) for item in groups}
+    filter_mode = "exact"
     page = 1
-    total_pages = max(1, (len(groups) + page_size - 1) // page_size)
     while True:
-        _print_table_page(groups, workspace, page, page_size)
-        raw = input("输入 n/p 翻页，直接输入 ID 数字（如 1 或 1,2）开始重构，输入 q 退出: ").strip()
+        filtered = _filter_groups_by_mode(groups, filter_mode, exact_cache)
+        if not filtered:
+            print(f"当前筛选模式 {filter_mode} 下无可选重复组。")
+            filter_mode = "all"
+            continue
+
+        total_pages = max(1, (len(filtered) + page_size - 1) // page_size)
+        page = max(1, min(page, total_pages))
+        exact_count = sum(1 for flag in exact_cache.values() if flag)
+        print(f"筛选模式: {filter_mode}（完全雷同组 {exact_count}/{len(groups)}）")
+        _print_table_page(filtered, workspace, page, page_size)
+        raw = input("输入 n/p 翻页，输入 f 切换筛选（exact/all），直接输入 ID 开始重构，输入 q 退出: ").strip()
         lowered = raw.lower()
         if lowered == "q":
             return None
+        if lowered == "f":
+            filter_mode = "all" if filter_mode == "exact" else "exact"
+            page = 1
+            continue
         if lowered == "n":
             page = min(total_pages, page + 1)
             continue
@@ -517,7 +718,12 @@ def _preview_with_paging(groups: list[DuplicationGroup], workspace: Path, page_s
             continue
         selected_ids = _parse_selection_input(raw)
         if selected_ids:
-            return selected_ids
+            visible_ids = {item.id for item in filtered}
+            picked = {item for item in selected_ids if item in visible_ids}
+            if not picked:
+                print("当前筛选结果中不包含所选 ID，请先切换筛选或翻页查看。")
+                continue
+            return picked
         print("无效输入，请重试。")
 
 
@@ -532,6 +738,52 @@ def _run_refactor_for_selected_groups(
     selected_groups = [item for item in groups if item.id in selected_ids]
     if not selected_groups:
         raise ValueError("未匹配到任何 group id，请检查输入的 ID")
+
+    plan_mode = getattr(args, "plan_mode", "replacement")
+
+    if plan_mode == "line-ops":
+        line_ops_markdown = _build_line_ops_input_markdown(selected_groups, config.workspace)
+        line_ops_markdown_file = Path(getattr(args, "out_claude_markdown", "artifacts/claude_refactor_input.md"))
+        line_ops_markdown_file.parent.mkdir(parents=True, exist_ok=True)
+        line_ops_markdown_file.write_text(line_ops_markdown, encoding="utf-8")
+        print(f"已生成 Line-Ops 输入文件: {line_ops_markdown_file}")
+
+        line_ops_plan: LLMLineOpsPlan | None = None
+        last_error: Exception | None = None
+        feedback: str | None = None
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            line_ops_plan = generate_line_ops_plan(config.model, line_ops_markdown, feedback=feedback)
+            try:
+                apply_line_ops_plan(config.workspace, line_ops_plan, dry_run=True)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                feedback = str(exc)
+                print(f"[line-ops] 计划校验失败，第 {attempt}/{max_attempts} 次: {exc}")
+
+        if line_ops_plan is None or last_error is not None:
+            raise RuntimeError(f"line-ops 计划生成失败，超过重试上限: {last_error}")
+
+        plan_file = Path(getattr(args, "out_plan", "artifacts/refactor_plan.json"))
+        plan_file.parent.mkdir(parents=True, exist_ok=True)
+        plan_file.write_text(line_ops_plan_to_pretty_json(line_ops_plan), encoding="utf-8")
+        print(f"已生成 line-ops 计划: {plan_file}")
+
+        if getattr(args, "apply", False):
+            logs = _apply_line_ops_with_guards(
+                config,
+                line_ops_plan,
+                args,
+                branch_prefix="deduper/refactor-line-ops",
+                create_branch=create_branch,
+            )
+        else:
+            logs = apply_line_ops_plan(config.workspace, line_ops_plan, dry_run=True)
+        print("\n".join(logs))
+        print("已应用修改" if getattr(args, "apply", False) else "dry-run 预演完成（未写入）")
+        return 0
 
     context = _collect_context(selected_groups, config.workspace)
     if not context:
@@ -630,6 +882,16 @@ def cmd_apply_plan(args: argparse.Namespace) -> int:
     config = load_config(Path(args.config) if args.config else None)
     payload = json.loads(Path(args.plan).read_text(encoding="utf-8"))
 
+    if getattr(args, "plan_mode", "replacement") == "line-ops":
+        line_ops_plan = LLMLineOpsPlan.from_dict(payload)
+        if args.apply:
+            logs = _apply_line_ops_with_guards(config, line_ops_plan, args, branch_prefix="deduper/apply-line-ops")
+        else:
+            logs = apply_line_ops_plan(config.workspace, line_ops_plan, dry_run=True)
+        print("\n".join(logs))
+        print("已应用修改" if args.apply else "dry-run 预演完成（未写入）")
+        return 0
+
     plan = LLMRefactorPlan.from_dict(payload)
     if args.apply:
         logs = _apply_with_guards(config, plan, args, branch_prefix="deduper/apply-plan")
@@ -727,6 +989,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="artifacts/claude_refactor_input.md",
         help="直接从预览进入重构时输出给 Claude 的输入 Markdown 路径",
     )
+    p_list.add_argument(
+        "--plan-mode",
+        choices=["replacement", "line-ops"],
+        default="replacement",
+        help="计划模式：replacement=整段替换；line-ops=结构化行操作",
+    )
     p_list.add_argument("--apply", action="store_true", help="直接从预览进入重构时是否真正写入文件")
     p_list.add_argument(
         "--git-branch",
@@ -761,6 +1029,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="artifacts/claude_refactor_input.md",
         help="输出给 Claude 的输入 Markdown 路径",
     )
+    p_refactor.add_argument(
+        "--plan-mode",
+        choices=["replacement", "line-ops"],
+        default="replacement",
+        help="计划模式：replacement=整段替换；line-ops=结构化行操作",
+    )
     p_refactor.add_argument("--apply", action="store_true", help="是否真正写入文件")
     p_refactor.add_argument(
         "--git-branch",
@@ -778,6 +1052,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_apply = sub.add_parser("apply-plan", help="从计划 JSON 应用改动")
     p_apply.add_argument("--plan", required=True, help="计划 JSON 路径")
     p_apply.add_argument("--config", required=False, help="配置文件路径")
+    p_apply.add_argument(
+        "--plan-mode",
+        choices=["replacement", "line-ops"],
+        default="replacement",
+        help="计划模式：replacement=整段替换；line-ops=结构化行操作",
+    )
     p_apply.add_argument("--apply", action="store_true", help="是否真正写入文件")
     p_apply.add_argument(
         "--git-branch",
@@ -853,6 +1133,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--out-claude-markdown",
         default="artifacts/claude_refactor_input.md",
         help="full 模式下输出给 Claude 的输入 Markdown 路径",
+    )
+    p_workflow.add_argument(
+        "--plan-mode",
+        choices=["replacement", "line-ops"],
+        default="replacement",
+        help="计划模式：replacement=整段替换；line-ops=结构化行操作",
     )
     p_workflow.add_argument("--apply", action="store_true", help="full 模式下是否真正写入")
     p_workflow.add_argument(
