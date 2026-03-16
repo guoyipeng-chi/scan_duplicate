@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 from pathlib import Path
 import re
@@ -61,6 +62,75 @@ def _render_occurrence_snippet(workspace: Path, group: DuplicationGroup, occurre
     return rel, start_line, end_line, snippet, total
 
 
+def _render_context_window(
+    workspace: Path,
+    group: DuplicationGroup,
+    occurrence,
+    window: int = 5,
+) -> tuple[str, int, int, str, str, str, int]:
+    full_path = _resolve_occurrence_path(workspace, occurrence.path)
+    rel = _to_rel_display(full_path, workspace)
+    if not full_path.exists():
+        return rel, 0, 0, "<empty>", "<file not found>", "<empty>", 0
+
+    content = full_path.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    total = len(lines)
+    start_line = max(1, occurrence.line)
+    if occurrence.end_line is not None:
+        end_line = min(total, max(start_line, occurrence.end_line))
+    else:
+        end_line = min(total, start_line + max(1, group.lines) - 1)
+
+    before_start = max(1, start_line - window)
+    after_end = min(total, end_line + window)
+
+    before = "\n".join(
+        f"{line_no}|{lines[line_no - 1]}" for line_no in range(before_start, start_line)
+    ) or "<empty>"
+    selected = "\n".join(
+        f"{line_no}|{lines[line_no - 1]}" for line_no in range(start_line, end_line + 1)
+    ) or "<empty>"
+    after = "\n".join(
+        f"{line_no}|{lines[line_no - 1]}" for line_no in range(end_line + 1, after_end + 1)
+    ) or "<empty>"
+    return rel, start_line, end_line, before, selected, after, total
+
+
+def _normalize_code_for_diff(code: str) -> list[str]:
+    return [line.strip() for line in code.splitlines()]
+
+
+def _summarize_occurrence_diff(canonical_code: str, occurrence_code: str) -> list[str]:
+    canonical_lines = _normalize_code_for_diff(canonical_code)
+    occurrence_lines = _normalize_code_for_diff(occurrence_code)
+    matcher = difflib.SequenceMatcher(None, canonical_lines, occurrence_lines)
+
+    summaries: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        canonical_chunk = [line for line in canonical_lines[i1:i2] if line]
+        occurrence_chunk = [line for line in occurrence_lines[j1:j2] if line]
+        if tag == "replace":
+            summaries.append(
+                f"replace canonical[{i1 + 1}:{i2}] -> occurrence[{j1 + 1}:{j2}]: "
+                f"{' | '.join(canonical_chunk[:2]) or '<empty>'} => {' | '.join(occurrence_chunk[:2]) or '<empty>'}"
+            )
+        elif tag == "delete":
+            summaries.append(
+                f"delete canonical[{i1 + 1}:{i2}]: {' | '.join(canonical_chunk[:2]) or '<empty>'}"
+            )
+        elif tag == "insert":
+            summaries.append(
+                f"insert occurrence[{j1 + 1}:{j2}]: {' | '.join(occurrence_chunk[:2]) or '<empty>'}"
+            )
+        if len(summaries) >= 6:
+            break
+
+    return summaries or ["与 canonical 片段相比无结构性差异，主要可能是命名或格式差异。"]
+
+
 def _build_claude_input_markdown(groups: list[DuplicationGroup], workspace: Path) -> str:
     sections: list[str] = []
     sections.append("# Claude Refactor Input")
@@ -74,6 +144,7 @@ def _build_claude_input_markdown(groups: list[DuplicationGroup], workspace: Path
     sections.append("- 若不同调用点存在细节差异，不要复制粘贴多套实现；请在公共实现中通过各自宏进行区分。")
     sections.append("- 宏命名要求语义清晰、作用域最小化，避免污染全局；必要时在调用文件内定义并在使用后取消定义。")
     sections.append("- 保持行为兼容：重构后输入输出语义不变，边界条件处理不变。")
+    sections.append("- 优先根据 canonical 片段抽取公共部分；不要在每个 occurrence 上重复实现同一逻辑。")
     sections.append("")
     sections.append("## Output Format (STRICT JSON)")
     sections.append("```json")
@@ -86,22 +157,41 @@ def _build_claude_input_markdown(groups: list[DuplicationGroup], workspace: Path
         sections.append(f"- lines: {group.lines}")
         sections.append(f"- tokens: {group.tokens}")
         sections.append(f"- occurrences: {len(group.occurrences)}")
+        involved_files = sorted({_to_rel_display(_resolve_occurrence_path(workspace, occ.path), workspace) for occ in group.occurrences})
+        sections.append(f"- involved_files: {', '.join(involved_files)}")
         sections.append("")
+
         if group.code_fragment:
-            sections.append("### CPD codefragment")
+            sections.append("### Canonical Duplicate Fragment")
             sections.append("```c")
             sections.append(group.code_fragment)
             sections.append("```")
             sections.append("")
 
         for idx, occurrence in enumerate(group.occurrences, start=1):
-            rel, start_line, end_line, snippet, total = _render_occurrence_snippet(workspace, group, occurrence)
+            rel, start_line, end_line, before, selected, after, total = _render_context_window(workspace, group, occurrence)
+            diff_summary = _summarize_occurrence_diff(group.code_fragment or selected, selected)
             sections.append(f"### Occurrence {idx}")
             sections.append(f"- file: {rel}")
             sections.append(f"- selected_range: {start_line}-{end_line}")
             sections.append(f"- file_total_lines: {total}")
+            sections.append("- difference_summary:")
+            for item in diff_summary:
+                sections.append(f"  - {item}")
+            sections.append("")
+            sections.append("#### Local Context Before")
             sections.append("```c")
-            sections.append(snippet)
+            sections.append(before)
+            sections.append("```")
+            sections.append("")
+            sections.append("#### Selected Range")
+            sections.append("```c")
+            sections.append(selected)
+            sections.append("```")
+            sections.append("")
+            sections.append("#### Local Context After")
+            sections.append("```c")
+            sections.append(after)
             sections.append("```")
             sections.append("")
 
