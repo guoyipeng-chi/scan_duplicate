@@ -112,16 +112,20 @@ LINE_OPS_SYSTEM_PROMPT = """你是资深重构工程师。
 def _build_user_prompt(groups: list[DuplicationGroup], files_context: dict[str, str]) -> str:
     groups_payload = []
     for group in groups:
+        occurrences_payload = [
+            {
+                "path": str(item.path),
+                "start_line": item.line,
+                "end_line": item.line + group.lines - 1,
+            }
+            for item in group.occurrences
+        ]
         groups_payload.append(
             {
                 "id": group.id,
                 "lines": group.lines,
                 "tokens": group.tokens,
-                "occurrences": [
-                    {"path": str(item.path), "line": item.line}
-                    for item in group.occurrences
-                ],
-                "code_fragment": group.code_fragment,
+                "occurrences": occurrences_payload,
             }
         )
 
