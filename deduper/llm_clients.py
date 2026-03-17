@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -13,6 +15,40 @@ except ImportError:
 
 from .config import ModelConfig, ModelRoute
 from .types import DuplicationGroup, LLMLineOpsPlan, LLMRefactorPlan
+
+
+def _save_prompt_snapshot(
+    *,
+    mode: str,
+    route: ModelRoute,
+    system_prompt: str,
+    user_prompt: str,
+) -> Path:
+    out_dir = Path("artifacts") / "prompts"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    provider = route.provider.replace("/", "_").replace("\\", "_")
+    model = route.model.replace("/", "_").replace("\\", "_").replace(":", "_")
+    out_file = out_dir / f"{ts}_{mode}_{provider}_{model}.txt"
+    content = (
+        f"mode: {mode}\n"
+        f"provider: {route.provider}\n"
+        f"model: {route.model}\n"
+        f"base_url: {route.base_url or ''}\n"
+        "\n===== SYSTEM PROMPT =====\n"
+        f"{system_prompt}\n"
+        "\n===== USER PROMPT =====\n"
+        f"{user_prompt}\n"
+    )
+    out_file.write_text(content, encoding="utf-8")
+    print(f"[LLM] prompt snapshot saved: {out_file}")
+    return out_file
+
+
+def _effective_system_prompt(base_prompt: str, route: ModelRoute) -> str:
+    if route.provider == "agent" and route.agent_name:
+        return f"{base_prompt}\n\n你的角色标识: {route.agent_name}"
+    return base_prompt
 
 
 SYSTEM_PROMPT = """你是资深重构工程师。你将收到若干 CPD 重复代码组和相关文件上下文。
@@ -36,7 +72,7 @@ SYSTEM_PROMPT = """你是资深重构工程师。你将收到若干 CPD 重复�
 
 
 LINE_OPS_SYSTEM_PROMPT = """你是资深重构工程师。
-你将收到 PMD 重复组的结构化信息：文件、起止行号、公共片段、差异摘要、局部上下文。
+你将收到 PMD 重复组的结构化信息：文件路径与起止行号（不含代码内容）。
 你不能输出整段替换方案，只能输出结构化行操作 JSON。
 
 输出格式（严格 JSON，不要 markdown）：
@@ -321,6 +357,20 @@ def generate_refactor_plan(
         try:
             print(f"[LLM] trying {route.provider} model={route.model} base_url={route.base_url}")
             if route.provider == "agent":
+                system_prompt = _effective_system_prompt(SYSTEM_PROMPT, route)
+                user_prompt = agent_user_prompt
+            else:
+                system_prompt = SYSTEM_PROMPT
+                user_prompt = default_user_prompt
+
+            _save_prompt_snapshot(
+                mode="replacement",
+                route=route,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+
+            if route.provider == "agent":
                 raw = _call_agent(route, config, agent_user_prompt)
             elif route.provider == "vllm":
                 if not _vllm_model_available(route):
@@ -408,6 +458,13 @@ def generate_line_ops_plan(
     for route in ordered_routes:
         try:
             print(f"[LLM] trying line-ops via {route.provider} model={route.model} base_url={route.base_url}")
+            system_prompt = _effective_system_prompt(LINE_OPS_SYSTEM_PROMPT, route)
+            _save_prompt_snapshot(
+                mode="line-ops",
+                route=route,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
             if route.provider == "agent":
                 raw = _call_agent_with_system(route, config, LINE_OPS_SYSTEM_PROMPT, user_prompt)
             elif route.provider == "vllm":
