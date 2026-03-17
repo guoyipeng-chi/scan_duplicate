@@ -137,7 +137,6 @@ def _build_user_prompt(groups: list[DuplicationGroup], files_context: dict[str, 
 
     payload = {
         "selected_duplication_groups": groups_payload,
-        "files_context": files_context_with_lines,
         "requirements": {
             "goal": "提取重复代码到公共文件并回填调用",
             "output": "strict_json_only",
