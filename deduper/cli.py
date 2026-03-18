@@ -23,7 +23,7 @@ from .llm_clients import (
     line_ops_plan_to_pretty_json,
     plan_to_pretty_json,
 )
-from .types import DuplicationGroup, LLMLineOpsPlan, LLMRefactorPlan
+from .types import DuplicationGroup, LLMLineOpsPlan, LLMRefactorPlan, LLMReplacement
 
 
 def _resolve_occurrence_path(workspace: Path, raw: Path) -> Path:
@@ -83,6 +83,73 @@ def _extract_occurrence_raw_snippet(workspace: Path, group: DuplicationGroup, oc
     if start_line > total:
         return ""
     return "\n".join(lines[start_line - 1 : end_line])
+
+
+def _extract_range_text(workspace: Path, file_path: Path, start_line: int, end_line: int) -> str:
+    full = _resolve_workspace_file(workspace, file_path)
+    if not full.exists():
+        return ""
+    lines = full.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return ""
+
+    start = max(1, start_line)
+    end = min(len(lines), max(start, end_line))
+    if start > len(lines):
+        return ""
+
+    # 尝试将区间扩展到一个括号平衡的完整代码块，避免 PMD 固定行数截断函数尾部。
+    balance = 0
+    for line in lines[start - 1 : end]:
+        balance += line.count("{") - line.count("}")
+
+    cursor = end
+    while balance > 0 and cursor < len(lines):
+        line = lines[cursor]
+        balance += line.count("{") - line.count("}")
+        cursor += 1
+
+    final_end = min(len(lines), max(end, cursor))
+    return "\n".join(lines[start - 1 : final_end])
+
+
+def _hydrate_refactor_plan_content(
+    plan: LLMRefactorPlan,
+    selected_groups: list[DuplicationGroup],
+    workspace: Path,
+) -> LLMRefactorPlan:
+    if not plan.replacements:
+        generated: list[LLMReplacement] = []
+        for group in selected_groups:
+            for occurrence in group.occurrences:
+                start_line = occurrence.line
+                end_line = start_line + max(1, group.lines) - 1
+                generated.append(
+                    LLMReplacement(
+                        file=occurrence.path,
+                        start_line=start_line,
+                        end_line=end_line,
+                        replacement="",
+                    )
+                )
+        plan.replacements = generated
+
+    for item in plan.replacements:
+        extracted = _extract_range_text(workspace, item.file, item.start_line, item.end_line)
+        if extracted.strip():
+            item.replacement = extracted
+
+    first_non_empty = next((item.replacement for item in plan.replacements if item.replacement.strip()), "")
+    if first_non_empty:
+        plan.common_code = first_non_empty
+    elif not plan.common_code.strip():
+        fallback = next((group.code_fragment.strip() for group in selected_groups if group.code_fragment.strip()), "")
+        plan.common_code = fallback
+
+    if str(plan.common_file).strip() in {"", "."}:
+        plan.common_file = Path("include/deduper_common.h")
+
+    return plan
 
 
 def _is_group_exact_duplicate(group: DuplicationGroup, workspace: Path) -> bool:
@@ -801,6 +868,7 @@ def _run_refactor_for_selected_groups(
         context,
         agent_markdown=claude_markdown,
     )
+    plan = _hydrate_refactor_plan_content(plan, selected_groups, config.workspace)
     plan_file = Path(getattr(args, "out_plan", "artifacts/refactor_plan.json"))
     plan_file.parent.mkdir(parents=True, exist_ok=True)
     plan_file.write_text(plan_to_pretty_json(plan), encoding="utf-8")

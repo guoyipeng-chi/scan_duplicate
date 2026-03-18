@@ -45,12 +45,12 @@ class LLMRefactorPlan:
                 file=Path(item["file"]),
                 start_line=int(item["start_line"]),
                 end_line=int(item["end_line"]),
-                replacement=str(item["replacement"]),
+                replacement=str(item.get("replacement", "")),
             )
             for item in payload.get("replacements", [])
         ]
         return LLMRefactorPlan(
-            common_file=Path(payload["common_file"]),
+            common_file=Path(payload.get("common_file", "include/deduper_common.h")),
             common_code=str(payload.get("common_code", "")),
             replacements=replacements,
             notes=str(payload.get("notes", "")),
